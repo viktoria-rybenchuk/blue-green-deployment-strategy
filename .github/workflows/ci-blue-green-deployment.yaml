@@ -119,13 +119,13 @@ jobs:
           if [ "$CURRENT_VERSION" == "v1.0.0" ] || [ "$CURRENT_VERSION" == "none" ]; then
             echo "NEW_VERSION=v2.0.0" >> $GITHUB_ENV
             echo "OLD_VERSION=v1.0.0" >> $GITHUB_ENV
-            echo "DEPLOYMENT_FILE=deployment-2.yaml" >> $GITHUB_ENV
+            echo "DEPLOYMENT_FILE=deployment-v2.yaml" >> $GITHUB_ENV
             echo "DEPLOYMENT_NAME=hello-gitops-v2" >> $GITHUB_ENV
             echo "OLD_DEPLOYMENT_NAME=hello-gitops-v1" >> $GITHUB_ENV
           else
             echo "NEW_VERSION=v1.0.0" >> $GITHUB_ENV
             echo "OLD_VERSION=v2.0.0" >> $GITHUB_ENV
-            echo "DEPLOYMENT_FILE=deployment-1.yaml" >> $GITHUB_ENV
+            echo "DEPLOYMENT_FILE=deployment-v1.yaml" >> $GITHUB_ENV
             echo "DEPLOYMENT_NAME=hello-gitops-v1" >> $GITHUB_ENV
             echo "OLD_DEPLOYMENT_NAME=hello-gitops-v2" >> $GITHUB_ENV
           fi
