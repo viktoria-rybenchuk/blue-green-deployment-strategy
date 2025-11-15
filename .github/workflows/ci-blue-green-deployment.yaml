@@ -102,7 +102,6 @@ jobs:
         with:
           cluster_name: ${{ env.GKE_CLUSTER }}
           location: ${{ env.GKE_REGION }}
-          credentials: ${{ secrets.GKE_SA_KEY }}
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Create namespace if not exists
