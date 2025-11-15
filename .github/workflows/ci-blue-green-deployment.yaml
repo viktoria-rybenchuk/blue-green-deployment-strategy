@@ -79,8 +79,9 @@ jobs:
 
     env:
       PROJECT_ID: ${{ secrets.GKE_PROJECT }}
-      GKE_CLUSTER: autopilot-cluster-1    # TODO: update to cluster name
-      GKE_REGION: us-central1       # TODO: update to cluster region
+      GKE_CLUSTER: autopilot-cluster-1
+      GKE_REGION: us-central1
+      NAMESPACE: hello-gitops
 
     steps:
       - name: Check out code
