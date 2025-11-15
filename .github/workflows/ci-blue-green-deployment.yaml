@@ -1,0 +1,260 @@
+name: Blue-Green CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./app
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Test with pytest
+      run: |
+        pytest
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      id: buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Cache Docker layers
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v5
+      with:
+        context: ./app
+        file: ./app/Dockerfile
+        builder: ${{ steps.buildx.outputs.name }}
+        push: true
+        tags: ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}, ${{ secrets.DOCKER_USERNAME }}/hello-gitops:latest
+        platforms: linux/amd64,linux/arm64
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+
+    env:
+      PROJECT_ID: ${{ secrets.GKE_PROJECT }}
+      GKE_CLUSTER: autopilot-cluster-1
+      GKE_REGION: us-central1
+      NAMESPACE: hello-gitops
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v1
+        with:
+          kustomize-version: "3.6.1"
+
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+
+      - name: Get the GKE credentials
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GKE_REGION"
+
+      - name: Create namespace if not exists
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Determine deployment version (v1/v2)
+        run: |
+          CURRENT_VERSION=$(kubectl get service hello-gitops -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo "none")
+          
+          if [ "$CURRENT_VERSION" == "v1.0.0" ] || [ "$CURRENT_VERSION" == "none" ]; then
+            echo "NEW_VERSION=v2.0.0" >> $GITHUB_ENV
+            echo "OLD_VERSION=v1.0.0" >> $GITHUB_ENV
+            echo "DEPLOYMENT_FILE=deployment-2.yaml" >> $GITHUB_ENV
+            echo "DEPLOYMENT_NAME=hello-gitops-v2" >> $GITHUB_ENV
+            echo "OLD_DEPLOYMENT_NAME=hello-gitops-v1" >> $GITHUB_ENV
+          else
+            echo "NEW_VERSION=v1.0.0" >> $GITHUB_ENV
+            echo "OLD_VERSION=v2.0.0" >> $GITHUB_ENV
+            echo "DEPLOYMENT_FILE=deployment-1.yaml" >> $GITHUB_ENV
+            echo "DEPLOYMENT_NAME=hello-gitops-v1" >> $GITHUB_ENV
+            echo "OLD_DEPLOYMENT_NAME=hello-gitops-v2" >> $GITHUB_ENV
+          fi
+          
+          echo "Current active version: $CURRENT_VERSION"
+          echo "Deploying new version: ${NEW_VERSION}"
+
+      - name: Update kustomization and deployment
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          cd k8s
+          
+          sed -i "s|image:.*|image: $DOCKER_USERNAME/hello-gitops:$GITHUB_SHA|g" ${{ env.DEPLOYMENT_FILE }}
+          
+          cat > kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+          - ${{ env.DEPLOYMENT_FILE }}
+          - service.yaml
+          - ingress.yaml
+          namespace: ${{ env.NAMESPACE }}
+          images:
+          - name: hello-gitops
+            newName: $DOCKER_USERNAME/hello-gitops
+            newTag: $GITHUB_SHA
+          commonLabels:
+            app: hello-gitops
+          EOF
+          
+          echo "Updated kustomization.yaml:"
+          cat kustomization.yaml
+          echo ""
+          echo "Updated ${{ env.DEPLOYMENT_FILE }}:"
+          cat ${{ env.DEPLOYMENT_FILE }}
+
+      - name: Deploy new version
+        run: |
+          echo "Deploying ${{ env.NEW_VERSION }}..."
+          kubectl apply -k k8s/
+          
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} -w --timeout=5m
+
+      - name: Test new deployment
+        run: |
+          echo "Testing new ${{ env.NEW_VERSION }} deployment..."
+          
+          sleep 10
+          
+          NEW_POD=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=hello-gitops,version=${{ env.NEW_VERSION }} -o jsonpath='{.items[0].metadata.name}')
+          
+          if [ -z "$NEW_POD" ]; then
+            echo "No pods found for ${{ env.NEW_VERSION }} deployment!"
+            exit 1
+          fi
+          
+          echo "Testing pod: $NEW_POD"
+          
+          kubectl port-forward -n ${{ env.NAMESPACE }} pod/$NEW_POD 8050:8050 &
+          PF_PID=$!
+          sleep 5
+          
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8050 || echo "000")
+          kill $PF_PID 2>/dev/null || true
+          
+          if [ "$RESPONSE" != "200" ]; then
+            echo "Health check failed with status code: $RESPONSE"
+            echo "Rolling back - deleting ${{ env.NEW_VERSION }} deployment..."
+            kubectl delete deployment ${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }}
+            exit 1
+          fi
+          
+          echo "✓ ${{ env.NEW_VERSION }} deployment health check passed!"
+
+      - name: Switch traffic to new version
+        run: |
+          echo "Switching traffic from ${{ env.OLD_VERSION }} to ${{ env.NEW_VERSION }}..."
+          
+          kubectl patch service hello-gitops -n ${{ env.NAMESPACE }} -p '{"spec":{"selector":{"version":"${{ env.NEW_VERSION }}"}}}'
+          
+          echo "✓ Traffic switched to ${{ env.NEW_VERSION }}!"
+
+      - name: Verify traffic switch
+        run: |
+          echo "Verifying traffic switch..."
+          sleep 5
+          
+          ACTIVE_VERSION=$(kubectl get service hello-gitops -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.selector.version}')
+          echo "Active version: $ACTIVE_VERSION"
+          
+          if [ "$ACTIVE_VERSION" != "${{ env.NEW_VERSION }}" ]; then
+            echo "❌ Traffic switch verification failed!"
+            exit 1
+          fi
+          
+          echo "✓ Traffic switch verified!"
+
+      - name: Monitor new deployment
+        run: |
+          echo "Monitoring ${{ env.NEW_VERSION }} deployment for 30 seconds..."
+          sleep 30
+          
+          # Check if pods are still healthy
+          POD_COUNT=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=hello-gitops,version=${{ env.NEW_VERSION }} --field-selector=status.phase=Running -o json | jq '.items | length')
+          
+          if [ "$POD_COUNT" -lt 3 ]; then
+            echo "❌ Not all pods are running! Rolling back..."
+            kubectl patch service hello-gitops -n ${{ env.NAMESPACE }} -p '{"spec":{"selector":{"version":"${{ env.OLD_VERSION }}"}}}'
+            exit 1
+          fi
+          
+          echo "✓ All ${{ env.NEW_VERSION }} pods are healthy!"
+
+      - name: Cleanup old deployment
+        run: |
+          echo "Cleaning up old ${{ env.OLD_VERSION }} deployment..."
+          
+          if kubectl get deployment ${{ env.OLD_DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} 2>/dev/null; then
+            kubectl delete deployment ${{ env.OLD_DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }}
+            echo "✓ Old ${{ env.OLD_VERSION }} deployment deleted!"
+          else
+            echo "No old deployment found, skipping cleanup."
+          fi
+
+      - name: Commit updated files
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add k8s/${{ env.DEPLOYMENT_FILE }} k8s/kustomization.yaml
+          git diff --staged --quiet || git commit -m "Deploy ${{ env.NEW_VERSION }} - Image: $GITHUB_SHA"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
