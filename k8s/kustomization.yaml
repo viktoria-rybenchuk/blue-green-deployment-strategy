@@ -8,4 +8,4 @@ namespace: hello-gitops
 images:
 - name: hello-gitops
   newName: victoriar18/hello-gitops
-  newTag: e481b77cffedaaaaa62f00d804164e2e651ca400
+  newTag: ebfe44e684c0099619ee38a994fb7822e8cbe2e5
