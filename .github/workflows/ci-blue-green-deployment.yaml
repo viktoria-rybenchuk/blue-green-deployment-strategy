@@ -79,30 +79,30 @@ jobs:
 
     env:
       PROJECT_ID: ${{ secrets.GKE_PROJECT }}
-      GKE_CLUSTER: autopilot-cluster-1
-      GKE_REGION: us-central1
-      NAMESPACE: hello-gitops
+      GKE_CLUSTER: autopilot-cluster-1    # TODO: update to cluster name
+      GKE_REGION: us-central1       # TODO: update to cluster region
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Check out code
+        uses: actions/checkout@v2
 
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v1
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v1
         with:
-          project_id: ${{ secrets.GKE_PROJECT }}
-          service_account_key: ${{ secrets.GKE_SA_KEY }}
+          kustomize-version: "3.6.1"
 
-      - name: Configure Docker for Google Container Registry
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+
+      - name: Get the GKE credentials so we can deploy to the cluster
         run: |
-          gcloud --quiet auth configure-docker
-
-      - name: Get GKE credentials
-        uses: google-github-actions/get-gke-credentials@v2
-        with:
-          cluster_name: ${{ env.GKE_CLUSTER }}
-          location: ${{ env.GKE_REGION }}
-          project_id: ${{ env.PROJECT_ID }}
+            gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GKE_REGION"
+          
 
       - name: Create namespace if not exists
         run: |
