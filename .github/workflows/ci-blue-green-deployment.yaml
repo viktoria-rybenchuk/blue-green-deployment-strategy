@@ -85,25 +85,28 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
 
       - name: Setup Kustomize
         uses: imranismail/setup-kustomize@v1
         with:
           kustomize-version: "3.6.1"
 
-      - name: Authenticate to Google Cloud
-        uses: 'google-github-actions/auth@v0'
-        with:
-          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v0
-
-      - name: Get the GKE credentials so we can deploy to the cluster
+      - name: Get the GKE credentials
         run: |
-            gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GKE_REGION"
-          
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GKE_REGION"
+        env:
+          USE_GKE_GCLOUD_AUTH_PLUGIN: 'True'
 
       - name: Create namespace if not exists
         run: |
@@ -112,7 +115,7 @@ jobs:
       - name: Determine deployment version (v1/v2)
         run: |
           CURRENT_VERSION=$(kubectl get service hello-gitops -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo "none")
-          
+
           if [ "$CURRENT_VERSION" == "v1.0.0" ] || [ "$CURRENT_VERSION" == "none" ]; then
             echo "NEW_VERSION=v2.0.0" >> $GITHUB_ENV
             echo "OLD_VERSION=v1.0.0" >> $GITHUB_ENV
@@ -126,7 +129,7 @@ jobs:
             echo "DEPLOYMENT_NAME=hello-gitops-v1" >> $GITHUB_ENV
             echo "OLD_DEPLOYMENT_NAME=hello-gitops-v2" >> $GITHUB_ENV
           fi
-          
+
           echo "Current active version: $CURRENT_VERSION"
           echo "Deploying new version: ${NEW_VERSION}"
 
@@ -135,9 +138,9 @@ jobs:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
         run: |
           cd k8s
-          
+
           sed -i "s|image:.*|image: $DOCKER_USERNAME/hello-gitops:$GITHUB_SHA|g" ${{ env.DEPLOYMENT_FILE }}
-          
+
           cat > kustomization.yaml <<EOF
           apiVersion: kustomize.config.k8s.io/v1beta1
           kind: Kustomization
@@ -153,7 +156,7 @@ jobs:
           commonLabels:
             app: hello-gitops
           EOF
-          
+
           echo "Updated kustomization.yaml:"
           cat kustomization.yaml
           echo ""
@@ -164,82 +167,82 @@ jobs:
         run: |
           echo "Deploying ${{ env.NEW_VERSION }}..."
           kubectl apply -k k8s/
-          
+
           kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} -w --timeout=5m
 
       - name: Test new deployment
         run: |
           echo "Testing new ${{ env.NEW_VERSION }} deployment..."
-          
+
           sleep 10
-          
+
           NEW_POD=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=hello-gitops,version=${{ env.NEW_VERSION }} -o jsonpath='{.items[0].metadata.name}')
-          
+
           if [ -z "$NEW_POD" ]; then
             echo "No pods found for ${{ env.NEW_VERSION }} deployment!"
             exit 1
           fi
-          
+
           echo "Testing pod: $NEW_POD"
-          
+
           kubectl port-forward -n ${{ env.NAMESPACE }} pod/$NEW_POD 8050:8050 &
           PF_PID=$!
           sleep 5
-          
+
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8050 || echo "000")
           kill $PF_PID 2>/dev/null || true
-          
+
           if [ "$RESPONSE" != "200" ]; then
             echo "Health check failed with status code: $RESPONSE"
             echo "Rolling back - deleting ${{ env.NEW_VERSION }} deployment..."
             kubectl delete deployment ${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }}
             exit 1
           fi
-          
+
           echo "✓ ${{ env.NEW_VERSION }} deployment health check passed!"
 
       - name: Switch traffic to new version
         run: |
           echo "Switching traffic from ${{ env.OLD_VERSION }} to ${{ env.NEW_VERSION }}..."
-          
+
           kubectl patch service hello-gitops -n ${{ env.NAMESPACE }} -p '{"spec":{"selector":{"version":"${{ env.NEW_VERSION }}"}}}'
-          
+
           echo "✓ Traffic switched to ${{ env.NEW_VERSION }}!"
 
       - name: Verify traffic switch
         run: |
           echo "Verifying traffic switch..."
           sleep 5
-          
+
           ACTIVE_VERSION=$(kubectl get service hello-gitops -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.selector.version}')
           echo "Active version: $ACTIVE_VERSION"
-          
+
           if [ "$ACTIVE_VERSION" != "${{ env.NEW_VERSION }}" ]; then
             echo "❌ Traffic switch verification failed!"
             exit 1
           fi
-          
+
           echo "✓ Traffic switch verified!"
 
       - name: Monitor new deployment
         run: |
           echo "Monitoring ${{ env.NEW_VERSION }} deployment for 30 seconds..."
           sleep 30
-          
+
           POD_COUNT=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=hello-gitops,version=${{ env.NEW_VERSION }} --field-selector=status.phase=Running -o json | jq '.items | length')
-          
+
           if [ "$POD_COUNT" -lt 3 ]; then
             echo "❌ Not all pods are running! Rolling back..."
             kubectl patch service hello-gitops -n ${{ env.NAMESPACE }} -p '{"spec":{"selector":{"version":"${{ env.OLD_VERSION }}"}}}'
             exit 1
           fi
-          
+
           echo "✓ All ${{ env.NEW_VERSION }} pods are healthy!"
 
       - name: Cleanup old deployment
         run: |
           echo "Cleaning up old ${{ env.OLD_VERSION }} deployment..."
-          
+
           if kubectl get deployment ${{ env.OLD_DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} 2>/dev/null; then
             kubectl delete deployment ${{ env.OLD_DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }}
             echo "✓ Old ${{ env.OLD_VERSION }} deployment deleted!"
