@@ -100,6 +100,10 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v0
 
+      - name: Install gke-gcloud-auth-plugin
+        run: |
+          gcloud components install gke-gcloud-auth-plugin --quiet
+
       - name: Get the GKE credentials
         run: |
           gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GKE_REGION"
@@ -225,7 +229,6 @@ jobs:
           echo "Monitoring ${{ env.NEW_VERSION }} deployment for 30 seconds..."
           sleep 30
           
-          # Check if pods are still healthy
           POD_COUNT=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=hello-gitops,version=${{ env.NEW_VERSION }} --field-selector=status.phase=Running -o json | jq '.items | length')
           
           if [ "$POD_COUNT" -lt 3 ]; then
